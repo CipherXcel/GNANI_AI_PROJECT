@@ -1,0 +1,93 @@
+name: gnani-audio-notes
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+x-backend: &backend
+  image: gnani-audio-notes-backend:local
+  build: {context: ./backend, target: runtime}
+  env_file: .env
+  environment: &backend-env
+    DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-audionotes}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-audionotes}}
+    AWS_REGION: ${AWS_REGION:?Set AWS_REGION}
+    S3_BUCKET: ${S3_BUCKET:?Set S3_BUCKET}
+    SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
+  restart: unless-stopped
+  init: true
+  logging: *logging
+  networks: [app]
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-audionotes}
+      POSTGRES_USER: ${POSTGRES_USER:-audionotes}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    ports: ["127.0.0.1:${POSTGRES_PORT:-5433}:5432"]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    logging: *logging
+    networks: [app]
+  migrate:
+    <<: *backend
+    command: alembic upgrade head
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+  backend:
+    <<: *backend
+    ports: ["127.0.0.1:${BACKEND_PORT:-8000}:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 6
+  worker:
+    <<: *backend
+    command: python -m app.worker
+    stop_grace_period: 45s
+    depends_on:
+      backend: {condition: service_healthy}
+  frontend:
+    build: ./frontend
+    ports: ["127.0.0.1:${FRONTEND_PORT:-3000}:3000"]
+    environment:
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      backend: {condition: service_healthy}
+    restart: unless-stopped
+    init: true
+    logging: *logging
+    networks: [app]
+  test:
+    <<: *backend
+    image: gnani-audio-notes-test:local
+    build: {context: ./backend, target: test}
+    profiles: [test]
+    command: pytest -q -p no:cacheprovider
+    restart: "no"
+    environment:
+      <<: *backend-env
+      APP_ENV: ${APP_ENV:-development}
+      APP_ORIGIN: http://localhost:3000
+      COOKIE_SECURE: "false"
+      GNANI_API_KEY: test-key
+      GEMINI_API_KEY: test-key
+      AWS_ACCESS_KEY_ID: testing
+      AWS_SECRET_ACCESS_KEY: testing
+      AWS_SESSION_TOKEN: testing
+      AWS_EC2_METADATA_DISABLED: "true"
+    depends_on:
+      postgres: {condition: service_healthy}
+volumes:
+  postgres_data:
+networks:
+  app:
+    driver: bridge

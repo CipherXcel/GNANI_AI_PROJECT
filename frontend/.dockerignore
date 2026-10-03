@@ -1,0 +1,13 @@
+node_modules
+.next
+.env*
+*.tsbuildinfo
+
+.env
+.env.*
+.aws
+.runtime
+*.pem
+*.key
+*.log
+*.dump

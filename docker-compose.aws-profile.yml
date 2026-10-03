@@ -1,0 +1,20 @@
+# Optional LOCAL override. Do not use on EC2; use an instance role there.
+services:
+  backend:
+    environment:
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+    volumes:
+      - type: bind
+        source: ${AWS_CONFIG_DIR:?Set AWS_CONFIG_DIR to your host .aws directory}
+        target: /home/appuser/.aws
+        read_only: true
+        bind: {create_host_path: false}
+  worker:
+    environment:
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+    volumes:
+      - type: bind
+        source: ${AWS_CONFIG_DIR:?Set AWS_CONFIG_DIR to your host .aws directory}
+        target: /home/appuser/.aws
+        read_only: true
+        bind: {create_host_path: false}

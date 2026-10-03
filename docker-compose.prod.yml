@@ -1,0 +1,90 @@
+name: gnani-audio-notes
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+x-backend: &backend
+  image: gnani-audio-notes-backend:local
+  build: {context: ./backend, target: runtime}
+  env_file: .env
+  environment: &backend-env
+    DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-audionotes}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-audionotes}}
+    AWS_REGION: ${AWS_REGION:?Set AWS_REGION}
+    S3_BUCKET: ${S3_BUCKET:?Set S3_BUCKET}
+    SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
+    APP_ENV: production
+    APP_ORIGIN: https://${DOMAIN:?Set DOMAIN}
+    COOKIE_SECURE: "true"
+  restart: unless-stopped
+  init: true
+  logging: *logging
+  networks: [app]
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-audionotes}
+      POSTGRES_USER: ${POSTGRES_USER:-audionotes}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    logging: *logging
+    networks: [app]
+  migrate:
+    <<: *backend
+    command: alembic upgrade head
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+  backend:
+    <<: *backend
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 6
+  worker:
+    <<: *backend
+    command: python -m app.worker
+    stop_grace_period: 45s
+    depends_on:
+      backend: {condition: service_healthy}
+  frontend:
+    build: ./frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      backend: {condition: service_healthy}
+    restart: unless-stopped
+    init: true
+    logging: *logging
+    networks: [app]
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend: {condition: service_healthy}
+      frontend: {condition: service_started}
+    restart: unless-stopped
+    logging: *logging
+    networks: [app]
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+networks:
+  app:
+    driver: bridge
