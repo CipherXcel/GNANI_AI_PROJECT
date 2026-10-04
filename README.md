@@ -1,122 +1,476 @@
-# Suno — Audio Notes
+# Gnani Audio Notes
 
-Existing Gnani Audio Notes project: Next.js, FastAPI, PostgreSQL and an independent worker. Audio is stored in **real private AWS S3 in both local development and production**. The worker keeps the existing 30-second Gnani REST section pipeline and saves each section before Gemini summarization.
+A full-stack audio processing platform that converts uploaded recordings into searchable transcripts and structured AI notes using **Gnani ASR** and **Gemini**.
 
-## Local startup (Windows)
+🌐 **Live Application:** https://notes.cipherxcel.app  
+🏗️ **Architecture:** https://notes.cipherxcel.app/architecture  
+💻 **GitHub:** https://github.com/CipherXcel/GNANI_AI_PROJECT
 
-Install Docker Desktop (Linux containers). Node 22+ is needed only for host frontend tooling/tests. Copy `.env.example` to `.env` only for a new installation; retain existing secrets and database values on this machine.
+---
 
-Set `POSTGRES_PASSWORD`, `SESSION_SECRET`, `AWS_REGION`, `S3_BUCKET`, `GNANI_API_KEY`, `GEMINI_API_KEY`, `GEMINI_MODEL`. Compose derives the database URL using `postgres:5432`. S3 must be provisioned privately with CORS allowing `http://localhost:3000` (see `deploy/s3-cors.json`).
+## Overview
 
-Choose one AWS credential source:
+Gnani Audio Notes allows users to upload audio recordings, store them securely in AWS S3, transcribe them with Gnani ASR, generate structured notes using Gemini, and revisit previous recordings from a searchable library.
 
-- Standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and optional `AWS_SESSION_TOKEN` in ignored `.env`.
-- Your normal host AWS profile: set `AWS_CONFIG_DIR=C:/Users/YOUR_USER/.aws` and `AWS_PROFILE=default` in `.env`. The helper adds the read-only profile mount. SSO profiles must be logged in on the host first; the app container does not write to the profile directory.
+The application separates file transfer, API requests, and long-running AI processing.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start-dev.ps1 -Build
-```
+Large audio files are uploaded directly from the browser to private AWS S3 using multipart presigned URLs instead of passing through the application server.
 
-Or run explicitly (profile variant):
+Transcription and summarization run asynchronously in a separate background worker using PostgreSQL-backed durable job state.
 
-```powershell
-docker compose -f docker-compose.yml -f docker-compose.aws-profile.yml up -d --build
-```
+---
 
-For credentials in `.env`, omit the second `-f`. The frontend uses `/api/...`; its server proxy connects to `backend:8000`. Open **http://localhost:3000**, matching `APP_ORIGIN`.
+## Core Features
 
-| Local service | Address |
-|---|---|
-| Frontend / architecture | http://localhost:3000 /architecture |
-| FastAPI / health | http://localhost:8000/docs /health |
-| PostgreSQL (local tooling only) | localhost:5433 |
-| Original audio | Private AWS S3 signed URLs |
+- Audio upload with progress tracking
+- Direct browser-to-AWS-S3 multipart upload
+- Private AWS S3 object storage
+- Short-lived presigned upload and playback URLs
+- Upload retries
+- Background audio processing
+- Gnani ASR transcription
+- Chunked transcription for longer audio
+- Persisted transcript progress
+- Structured Gemini summaries
+- Recording library/history
+- Search and filtering
+- Audio playback
+- Playback speed controls
+- Timestamped transcript navigation
+- Rename and delete
+- Export support
+- Processing and error states
+- Responsive frontend
+- Production HTTPS deployment
 
-On this machine, another project occupies 3000/8000, so the ignored `.env` selects **http://localhost:3100** and API port **8100**. Optional `FRONTEND_PORT`, `BACKEND_PORT`, `POSTGRES_PORT` override host bindings only; container service ports stay 3000/8000/5432. Match `APP_ORIGIN` and bucket CORS to the selected frontend port. Set `$env:TEST_BASE_URL="http://localhost:3100"` before browser tests on this machine.
+---
 
-All local host ports bind to loopback. PostgreSQL uses the existing `gnani-audio-notes_postgres_data` volume. `docker compose down` preserves it; **do not use `down -v`**. Stopping the browser after a completed upload does not stop processing.
-
-```powershell
-docker compose logs -f backend worker
-docker compose ps
-docker compose restart worker
-```
-
-For hot frontend editing, stop its container, then run `npm ci` in `frontend` and `$env:BACKEND_URL='http://127.0.0.1:8000'; npm run dev`. The loopback URL is a host development setting only; containers use Docker service names.
-
-## Features
-
-- Drag-and-drop audio uploads, validated type/size, language selection, actual byte progress, bounded multipart retries, and cancellation.
-- English and nine Indian language choices supported by Gnani REST.
-- Background transcription of long recordings using 30-second sections with 1-second overlap.
-- Saved chunk checkpoints and durable jobs; crashed workers can be replaced and expired leases recovered.
-- Structured Gemini overview, key takeaways, topics, and explicit action items.
-- Saved recording library with search, status filters, list/grid views, rename, and confirmed deletion.
-- Audio playback, speed controls, timestamp seeking, searchable transcripts, copy, and TXT/Markdown/SRT/JSON export.
-- Useful empty, loading, processing, disconnected, and failed states. A failed summary preserves the complete transcript.
-- Browser-specific private workspaces with signed HttpOnly cookies and per-record authorization.
-- Responsive interface, keyboard-accessible dialogs and tabs, reduced-motion support, and an `/architecture` explanation.
-
-## Flow and data model
+## Production Architecture
 
 ```text
-Next.js browser → FastAPI upload session → signed multipart PUTs → private S3 bucket
-                         ↓ complete & validate
-              PostgreSQL: note + job in one transaction
-                         ↓ worker claim + renewable lease
-        download original → FFprobe → FFmpeg 30s sections → Gnani
-                         ↓ checkpoint each transcript section
-           save full transcript → Gemini map/reduce summary → ready
-                         ↓
-                  browser polls saved progress
+                         User
+                          │
+                        HTTPS
+                          │
+                          ▼
+                       Caddy
+                          │
+                   AWS EC2 Instance
+                    Docker Compose
+                          │
+              ┌───────────┴───────────┐
+              │                       │
+              ▼                       ▼
+           Next.js                 FastAPI
+           Frontend                Backend
+                                      │
+                         ┌────────────┴────────────┐
+                         │                         │
+                         ▼                         ▼
+                    PostgreSQL                  AWS S3
+                         ▲
+                         │
+                      Worker
+                         │
+                   ┌─────┴─────┐
+                   ▼           ▼
+                Gnani        Gemini
+                 ASR         Summary
 ```
 
-`notes` contains metadata, progress, transcript and summary; `segments` contains chunk transcripts and approximate times; `jobs` implements the durable queue; `worker_heartbeats` indicates whether a worker is online. The queue uses PostgreSQL `FOR UPDATE SKIP LOCKED`, 180-second leases and 15-second heartbeats. Ownership is checked before each checkpoint. A retry after an LLM error uses the saved transcript without invoking ASR again.
+The EC2 instance runs:
 
-Alembic runs as a one-shot migration service before the API starts. The operator provisions private AWS S3, browser CORS and a one-day incomplete-multipart cleanup rule. The API does not need bucket-administration permissions. The worker starts only after the API is healthy.
+- Caddy
+- Next.js
+- FastAPI
+- background worker
+- PostgreSQL
 
-## Key files
+External services:
 
-| File | Responsibility |
-|---|---|
-| `frontend/app/page.tsx` | Library, search, filters and upload entry point |
-| `frontend/components/upload-dialog.tsx` | Multipart upload and byte progress |
-| `frontend/components/note-reader.tsx` | Playback, transcript, summary and export |
-| `frontend/app/api/[...path]/route.ts` | Same-origin proxy to FastAPI; no provider keys |
-| `backend/app/api.py` | API routes, ownership checks, upload finalization |
-| `backend/app/worker.py` | Durable queue claims, leases, checkpoints and processing |
-| `backend/app/audio.py` | Audio validation, segmentation and boundary deduplication |
-| `backend/app/providers.py` | Gnani/Gemini requests, retries and summary validation |
-| `backend/app/models.py` | SQLAlchemy data model |
-| `backend/app/storage.py` | AWS default credential chain and private signed URLs |
-| `backend/tests/test_pipeline.py` | Critical integration and failure-path tests |
+- AWS S3
+- Gnani ASR
+- Gemini
 
+Only Caddy exposes public application ports.
 
-## Automated verification
+```text
+/api/*  → FastAPI
+/*      → Next.js
+```
+
+---
+
+## Upload Flow
+
+Audio is uploaded directly from the browser to AWS S3.
+
+```text
+Browser
+   │
+   │ create upload
+   ▼
+FastAPI
+   │
+   │ create S3 multipart upload
+   │ generate presigned URLs
+   ▼
+AWS S3
+
+Browser ───────── direct multipart PUT ─────────► AWS S3
+```
+
+Flow:
+
+1. The user selects an audio file.
+2. Next.js asks FastAPI to initialize an upload.
+3. FastAPI creates an AWS S3 multipart upload.
+4. FastAPI generates short-lived presigned part URLs.
+5. The browser uploads the audio parts directly to private AWS S3.
+6. The browser sends uploaded part information back to FastAPI.
+7. FastAPI validates and completes the multipart upload.
+8. A durable processing job is stored in PostgreSQL.
+9. The worker claims the job and begins processing.
+
+Large audio bodies therefore do not pass through Next.js, Caddy, or FastAPI.
+
+---
+
+## Processing Pipeline
+
+```text
+AWS S3
+   │
+   ▼
+Background Worker
+   │
+   ▼
+Audio Processing
+   │
+   ▼
+Gnani ASR
+   │
+   ▼
+Transcript
+   │
+   ▼
+Gemini
+   │
+   ▼
+Structured Summary
+   │
+   ▼
+PostgreSQL
+   │
+   ▼
+FastAPI
+   │
+   ▼
+Next.js UI
+```
+
+The background worker runs separately from the FastAPI web process.
+
+Processing state is persisted in PostgreSQL, allowing work to continue independently from the browser session.
+
+---
+
+## Technology Stack
+
+### Frontend
+
+- Next.js
+- React
+- TypeScript
+
+### Backend
+
+- FastAPI
+- Python
+- SQLAlchemy
+- Alembic
+
+### Database
+
+- PostgreSQL
+
+### Storage
+
+- AWS S3
+- boto3
+
+### AI Services
+
+- Gnani ASR
+- Google Gemini
+
+### Infrastructure
+
+- AWS EC2
+- Docker
+- Docker Compose
+- Caddy
+- HTTPS / automatic TLS
+
+---
+
+## Engineering Decisions
+
+### Direct S3 multipart upload
+
+Audio recordings can be much larger than normal API requests. Direct browser-to-S3 uploads keep large file transfers away from the application server while retaining a private bucket through presigned URLs.
+
+### Separate background worker
+
+Speech-to-text and summarization can take much longer than normal HTTP requests. A dedicated worker keeps long-running AI processing outside FastAPI's request path.
+
+### PostgreSQL-backed processing state
+
+PostgreSQL already stores application data, so durable job state can be maintained without introducing another queue service for the current project scale.
+
+### Private S3
+
+Audio objects are never made public. Temporary presigned URLs grant only short-lived upload or playback access.
+
+### Docker Compose
+
+The current application fits on one EC2 host. Docker Compose provides clear service isolation without unnecessary orchestration complexity.
+
+### Caddy
+
+Caddy provides HTTPS, automatic certificate management, HTTP-to-HTTPS redirects, and reverse proxy routing with very little configuration.
+
+---
+
+## Security
+
+The production system uses:
+
+- HTTPS through Caddy
+- private AWS S3
+- short-lived presigned S3 URLs
+- EC2 IAM role for AWS access
+- boto3's standard credential chain
+- secrets through environment variables
+- internal Docker networking
+- PostgreSQL not publicly exposed
+- FastAPI not directly exposed
+- frontend container not directly exposed
+
+Secrets, AWS credentials, database passwords, session keys, and provider API keys must never be committed to Git.
+
+---
+
+## Local Development
+
+The local application also uses real AWS S3.
+
+MinIO is not required.
+
+Create the environment configuration from:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\test.ps1
+Copy-Item .env.example .env
+```
+
+Add the required values locally.
+
+Never commit `.env`.
+
+Run the application using the repository's Docker Compose development configuration.
+
+Typical startup:
+
+```powershell
+docker compose up -d --build
+```
+
+If the project uses the AWS profile Compose override:
+
+```powershell
+docker compose `
+  -f docker-compose.yml `
+  -f docker-compose.aws-profile.yml `
+  up -d --build
+```
+
+Local AWS access uses the normal AWS credential chain.
+
+---
+
+## Environment Configuration
+
+Important environment variable names include:
+
+```text
+APP_ENV
+APP_ORIGIN
+
+POSTGRES_DB
+POSTGRES_USER
+POSTGRES_PASSWORD
+DATABASE_URL
+
+SESSION_SECRET
+
+AWS_REGION
+S3_BUCKET
+
+GNANI_API_KEY
+
+GEMINI_API_KEY
+GEMINI_MODEL
+
+DOMAIN
+```
+
+Only variable names belong in documentation.
+
+Real values must remain in ignored environment files.
+
+---
+
+## Production Deployment
+
+Production:
+
+https://notes.cipherxcel.app
+
+The production Docker Compose stack runs on a single AWS EC2 instance.
+
+Caddy is the only public application service and exposes ports:
+
+```text
+80
+443
+```
+
+Routing:
+
+```text
+/api/* → backend:8000
+/*     → frontend:3000
+```
+
+PostgreSQL uses a persistent Docker volume.
+
+AWS S3, Gnani, and Gemini remain external services.
+
+See [`DEPLOY_EC2.md`](DEPLOY_EC2.md) for detailed deployment instructions.
+
+---
+
+## Source Control and Deployment
+
+GitHub is the source repository:
+
+https://github.com/CipherXcel/GNANI_AI_PROJECT
+
+Current deployment updates are manual:
+
+```text
+Local Development
+       │
+       │ git push
+       ▼
+     GitHub
+       │
+       │ git pull
+       ▼
+     AWS EC2
+       │
+       ▼
+ Docker Compose
+```
+
+The current project does not claim automatic CI/CD.
+
+---
+
+## Testing
+
+Frontend:
+
+```powershell
 cd frontend
-npm run test:ui
+
+npm run typecheck
+npm run lint
+npm run build
 ```
 
-Backend tests use a separate local PostgreSQL database ending in `_test`, real FFmpeg and in-process Moto S3 mocks. No AWS or AI provider calls are made. They cover workspace isolation, multipart integrity/idempotency, provider retries, corrupt audio, saved transcripts, lease recovery and interruption after a saved chunk. Frontend checks include TypeScript, ESLint, production build and desktop/tablet/mobile Playwright regression tests with API fixtures. Browser tests require the local frontend at port 3000 and Microsoft Edge (or install Playwright Chromium and set `PLAYWRIGHT_CHANNEL=chromium`). Tests do not need a private user's browser cookie.
+Backend tests should be run using the project's existing Python environment/test configuration.
 
-Live provider checks are separate and use credits:
+---
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\generate-test-audio.ps1
-node scripts/e2e.mjs
+## Repository Structure
+
+```text
+GNANI_AI_PROJECT/
+│
+├── backend/
+│   ├── app/
+│   └── tests/
+│
+├── frontend/
+│   ├── app/
+│   ├── components/
+│   └── tests/
+│
+├── scripts/
+├── docker-compose.yml
+├── docker-compose.prod.yml
+├── Caddyfile
+├── DEPLOY_EC2.md
+├── .env.example
+└── README.md
 ```
 
-`node scripts/e2e.mjs --resume` retries a saved failed recording without retranscribing saved sections. Runtime cookies, audio and results stay under ignored `.runtime/`. Do not share them. `scripts/ui-smoke.cjs` remains available for the original real-recording smoke workflow.
+Important files:
 
-## EC2 deployment
+| File | Purpose |
+|---|---|
+| `backend/app/api.py` | FastAPI routes and upload coordination |
+| `backend/app/worker.py` | Background processing |
+| `backend/app/storage.py` | AWS S3 client and presigned URLs |
+| `frontend/app/architecture/page.tsx` | Production architecture explanation |
+| `docker-compose.prod.yml` | Production Docker topology |
+| `Caddyfile` | HTTPS and reverse proxy routing |
+| `DEPLOY_EC2.md` | EC2 deployment instructions |
 
-Follow [DEPLOY_EC2.md](DEPLOY_EC2.md). One EC2 runs Caddy, frontend, backend, worker and PostgreSQL. Only Caddy exposes 80/443. Production uses an EC2 IAM role, private AWS S3 and secure same-origin cookies. Docker Compose files are independently runnable; do not layer the development Compose file into production.
+---
 
-## Operational limits
+## Trade-offs and Future Improvements
 
-The default upload limit is 50 GiB; choose a smaller `MAX_UPLOAD_BYTES` if the worker disk cannot hold the original plus a temporary WAV chunk. Original playback depends on browser codec support. Section timestamps are approximate, not word-level subtitles. Workspace access depends on the HttpOnly browser cookie and stable `SESSION_SECRET`; clearing cookies loses access. Anonymous workspaces are not accounts or a complete abuse-prevention system. A small public demo needs a controlled audience/provider budget. Persistent volumes need separate backups. See [VERIFICATION.md](VERIFICATION.md) for actual executed checks and remaining live gates.
+The current architecture intentionally prioritizes simplicity.
 
-Provider references: [Gnani STT](https://docs.gnani.ai/api/STT/speech-to-text), [Gemini structured output](https://ai.google.dev/gemini-api/docs/structured-output).
+Current limitations:
+
+- one EC2 host is a single point of failure;
+- PostgreSQL runs on the same host;
+- persistent Docker storage is not an off-site backup;
+- external AI providers affect processing availability.
+
+Possible future improvements:
+
+- managed PostgreSQL;
+- automated off-site backups;
+- independent worker scaling;
+- stronger observability;
+- automated CI/CD;
+- multi-instance deployment.
+
+These are future improvements and are not part of the current production architecture.
+
+---
+
+## Links
+
+**Live Application**  
+https://notes.cipherxcel.app
+
+**Architecture**  
+https://notes.cipherxcel.app/architecture
+
+**GitHub Repository**  
+https://github.com/CipherXcel/GNANI_AI_PROJECT
