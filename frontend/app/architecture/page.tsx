@@ -81,6 +81,8 @@ export default function Architecture() {
           </div>
         </div>
 
+        <div></div>
+
         <div
           className="architecture-flow"
           aria-label="Upload to storage, background transcription, and AI summary"
