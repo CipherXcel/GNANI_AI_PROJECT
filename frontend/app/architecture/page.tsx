@@ -81,10 +81,9 @@ export default function Architecture() {
           </div>
         </div>
 
-        <div>
-          <br>
-          </br>
-        </div>
+        <p>
+          <br />
+        </p>
 
         <div
           className="architecture-flow"
