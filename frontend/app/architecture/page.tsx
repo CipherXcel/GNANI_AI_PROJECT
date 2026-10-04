@@ -342,28 +342,6 @@ export default function Architecture() {
             </p>
           </section>
 
-          <section className="wide">
-            <h2>Trade-offs and future improvements</h2>
-
-            <p>
-              The current production architecture intentionally uses one EC2
-              instance to keep deployment simple and easy to operate. This also
-              means the EC2 host is currently a single point of failure.
-            </p>
-
-            <p>
-              PostgreSQL uses a persistent Docker volume, so normal container
-              recreation does not remove application data. A persistent volume
-              is not an off-site backup.
-            </p>
-
-            <p>
-              Possible future improvements include automated off-site backups,
-              managed PostgreSQL, independently scalable workers, stronger
-              monitoring, usage controls, and automated CI/CD. These are future
-              improvements, not components of the current production system.
-            </p>
-          </section>
         </div>
 
         <div className="repo-banner">
